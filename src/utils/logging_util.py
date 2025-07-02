@@ -14,8 +14,12 @@ class GclClient:
         self.gcl_client = logging.Client.from_service_account_json(
             os.environ["GOOGLE_APPLICATION_CREDENTIALS"],project=os.environ["PROJECT_NAME"])
         self.handler = CloudLoggingHandler(self.gcl_client, name=name())
+        formatter = pylogging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s')
+        file_handler = pylogging.FileHandler("debug.log", mode="w", encoding="utf-8")
+        file_handler.setFormatter(formatter)
         logger = pylogging.getLogger(name())
         logger.addHandler(self.handler)
+        logger.addHandler(file_handler)
         logger.setLevel(pylogging.INFO)
         self.logger = logger
 
