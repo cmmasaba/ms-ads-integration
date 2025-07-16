@@ -1,4 +1,4 @@
-"""Logging module integrated with GCP"""
+"""Logging module integrated with GCP Logging"""
 import os
 import logging as pylogging
 from google.cloud import logging

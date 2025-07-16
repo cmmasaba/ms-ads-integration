@@ -1,7 +1,8 @@
+"""Driver code"""
 from app.main import BingAds
 
 def main() -> None:
-    """Driver code"""
+    """Entrypoint"""
     app = BingAds()
     logger = app.logger
 
