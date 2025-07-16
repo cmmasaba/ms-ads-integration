@@ -1,3 +1,4 @@
+"""The extraction automation"""
 import json
 import time
 import os
@@ -5,7 +6,7 @@ from time import sleep
 from typing import Any
 import zipfile
 import shutil
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta
 
 import requests
 from dotenv import load_dotenv
@@ -13,13 +14,15 @@ from google.cloud import bigquery
 
 from utils.logging_util import GclClient
 
-load_dotenv()
-
 class BingAds:
     """Automation for extracting and loading Ads data to BQ"""
-    def __init__(self, token_cache_file="client_bing_ads_token.json") -> None:
+    def __init__(self, token_cache_file="client_tokens.json") -> None:
         """
-        Initializes the BingAdsAuthenticator.
+        Initializes BingAds
+        Args:
+            token_cache_file: a file where refresh tokens and access tokens are stored.
+        Returns:
+            None
         """
         self.logging_client = GclClient()
         self.logger = self.logging_client.get_logger()
@@ -30,7 +33,11 @@ class BingAds:
         self.bq_client = bigquery.Client(project=os.getenv("PROJECT_NAME"))
 
     def _load_tokens(self) -> None:
-        """Loads tokens from the cache file."""
+        """
+        Loads tokens from the cache file and stores them in variables
+        Returns:
+            None
+        """
         try:
             with open(self.token_cache_file, "r", encoding="utf-8") as f:
                 token_data = json.load(f)
@@ -41,10 +48,13 @@ class BingAds:
             self.logger.error("[_load_tokens] Cache file not found: %s", e)
         except json.JSONDecodeError as e:
             self.logger.error("[_load_tokens] Error decoding cache file: %s", e)
-            os.remove(self.token_cache_file)
 
     def _save_tokens(self) -> None:
-        """Saves tokens to the cache file."""
+        """
+        Saves tokens to the cache file
+        Returns:
+            None
+        """
         token_data = {
             "access_token": self.access_token,
             "refresh_token": self.refresh_token,
@@ -53,12 +63,16 @@ class BingAds:
         with open(self.token_cache_file, "w", encoding="utf-8") as f:
             json.dump(token_data, f, indent=4, sort_keys=True)
 
-    def _refresh_access_token(self) -> str | None:
-        """Refreshes the access token using the refresh token."""
+    def _refresh_access_token(self) -> str:
+        """
+        Refreshes the access token using the refresh token, saves the new tokens and returns the access token
+        Returns:
+            The access token as a string. An empty string means the operation to refresh the access token failed
+        """
         if not self.refresh_token:
             raise ValueError("Refresh token is missing. Obtain it first.")
 
-        token_url = f"https://login.microsoftonline.com/{os.getenv("TENANT_ID")}/oauth2/v2.0/token"
+        token_url = f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}/oauth2/v2.0/token"
         data = {
             "grant_type": "refresh_token",
             "refresh_token": self.refresh_token,
@@ -67,6 +81,7 @@ class BingAds:
         }
 
         response = None
+        access_token = ""
         try:
             response = requests.post(token_url, data=data, timeout=15)
             response.raise_for_status()
@@ -77,7 +92,7 @@ class BingAds:
             self.expires_at = time.time() + token_data["expires_in"]
 
             self._save_tokens()
-            return self.access_token
+            access_token = self.access_token
         except requests.exceptions.RequestException as e:
             if response is not None:
                 try:
@@ -90,23 +105,28 @@ class BingAds:
                     self.logger.info("[_refresh_access_token] API request failed: %s. Could not decode JSON from response %s", e, response.text)
             else:
                 self.logger.info("[_refresh_access_token] API request failed: %s. No response was received", e)
-            return None
         except KeyError as e:
             self.logger.info("[_refresh_access_token] Missing key in token response: %s", e)
-            return None
 
-    def get_access_token(self) -> str | None:
-        """Retrieves a valid access token, refreshing if necessary."""
+        return access_token
+
+    def get_access_token(self) -> str:
+        """Retrieves a valid access token, refreshing if necessary"""
         self._load_tokens()
         if self.access_token and self.expires_at > time.time() + 60:
             return self.access_token
 
         return self._refresh_access_token()
 
-    def get_headers(self):
-        """Returns headers including the Authorization header."""
+    def get_headers(self) -> None | dict[str, Any]:
+        """
+        Build and return headers i.e Authorization, CustomerId, CustomerAccountId, Content-Type, DeveloperToken
+        Returns:
+            None if the access token is missing otherwise a dict of header information
+        """
         access_token = self.get_access_token()
-        if not access_token:
+        if access_token == "":
+            self.logger.error("[get_headers] Access token for Authorization header is missing")
             return None
 
         headers: dict[str, Any] = {
@@ -118,9 +138,14 @@ class BingAds:
         }
         return headers
 
-    def submit_download_report(self, headers, body: dict[str, dict[str, Any]]) -> str | None:
+    def submit_download_report(self, headers: dict[str, Any], body: dict[str, dict[str, Any]]) -> str | None:
         """
         Submit request to download report
+        Args:
+            headers: Header information
+            body: Body of the report type to download
+        Returns:
+            None if the operation failed otherwise a string of the report ID used to poll for a download URL
         """
         submit_download_api_url = 'https://reporting.api.bingads.microsoft.com/Reporting/v13/GenerateReport/Submit'
 
@@ -144,13 +169,11 @@ class BingAds:
                 self.logger.error("[submit_download_report] API request failed: %s", e)
             return None
 
-    def get_execution_tm(self):
-        yesterday = datetime.today() - timedelta(days=1)
-        return yesterday.strftime('%Y%m%d')
-
     def campaign_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return campaign performance request body in json format
+        Returns:
+            The body of the campaign performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         yesterday = datetime.today() - timedelta(days=1)
@@ -218,6 +241,8 @@ class BingAds:
     def account_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return account performance report request body in json format
+        Returns:
+            The body of the account performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -280,6 +305,8 @@ class BingAds:
     def adgroup_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return adgroup performance report request body in json format
+        Returns:
+            The body of the adgroup performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -342,6 +369,8 @@ class BingAds:
     def ad_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return ad performance report request body in json format
+        Returns:
+            The body of the ad performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -406,6 +435,8 @@ class BingAds:
     def asset_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return asset performance report request body in json format
+        Returns:
+            The body of the asset performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -467,6 +498,8 @@ class BingAds:
     def audience_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return audience performance report request body in json format
+        Returns:
+            The body of the audience performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -532,6 +565,8 @@ class BingAds:
     def conversion_performance_request_body(self) -> dict[str, dict[str, Any]]:
         """
         Return conversion performance report request body in json format
+        Returns:
+            The body of the conversion performance report containing the fields to get
         """
         customer_account_id =f"{os.getenv('CUSTOMER_ACCOUNT_ID')}"
         json_body ={
@@ -588,9 +623,14 @@ class BingAds:
             }
         return json_body
 
-    def poll_generate_report(self, report_id: str, headers: dict[str, Any]) -> str | None:
+    def poll_generate_report(self, report_id: str, headers: dict[str, Any]) -> str:
         """
         Poll submitted report request url to see if it is ready for download
+        Args:
+            report_id: the ID of the report to be downloaded
+            headers: header information
+        Returns:
+            A URL for downloading the report, an empty string means an error occurred
         """
         poll_generate_api_url = 'https://reporting.api.bingads.microsoft.com/Reporting/v13/GenerateReport/Poll'
 
@@ -602,15 +642,20 @@ class BingAds:
                 response = response.json()
                 if response['ReportRequestStatus']['Status'] == 'Success':
                     download_url = response['ReportRequestStatus']['ReportDownloadUrl']
-                    return download_url
                 sleep(30)
         except requests.exceptions.RequestException as e:
             self.logger.error("[poll_generate_report] API request failed: %s", e)
         return download_url
 
-    def download_and_load_report(self, report_type, body: dict[str, dict[str, Any]], table_id: str) -> bool:
+    def download_and_load_report(self, report_type: str, body: dict[str, dict[str, Any]], table_id: str) -> bool:
         """
         Download report and load it to BQ
+        Args:
+            report_type: The report type being downloaded
+            body: the fields to include in the report
+            table_id: the BogQuery ID of the table where the table will be stored
+        Returns:
+            True or False based on success
         """
         if not body or not table_id:
             self.logger.error("[download_and_load_report] Missing body or table_id for report %s", report_type)
@@ -629,7 +674,8 @@ class BingAds:
 
         url = self.poll_generate_report(report_id, headers)
 
-        def download_report(report_type, report_url: str) -> str | None:
+        def _download_report(report_type, report_url: str) -> str | None:
+            """Stream the download of the report at the given URL"""
             self.logger.info("[download_and_load_report] Downloading performance report for %s", report_type)
             response = None
             try:
@@ -646,7 +692,8 @@ class BingAds:
                     self.logger.error("[download_report] Error: %s", e)
                 return None
 
-        def unzip_file(file_path) -> str | None:
+        def _unzip_file(file_path) -> str | None:
+            """Unzip the downloaded report archive"""
             self.logger.info("Unzipping zip file %s", file_path)
             try:
                 with zipfile.ZipFile(file_path, "r") as zip_ref:
@@ -661,13 +708,13 @@ class BingAds:
                 return None
 
         if url:
-            downloaded_file = download_report(report_type, url)
+            downloaded_file = _download_report(report_type, url)
             if not downloaded_file:
                 self.logger.error("[download_and_load_report] Error downloading report")
                 return False
 
             self.logger.info("[download_and_load_report] Report %s downloaded successfully", downloaded_file)
-            saved_file_path = unzip_file(downloaded_file)
+            saved_file_path = _unzip_file(downloaded_file)
             if not saved_file_path:
                 self.logger.error("[download_and_load_report] Error saving downloaded file")
                 return False
