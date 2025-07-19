@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import requests
 from dotenv import load_dotenv
 from google.cloud import bigquery
+from auth.main import start_local_server
 
 from utils.logging_util import GclClient
 
@@ -63,6 +64,42 @@ class BingAds:
         with open(self.token_cache_file, "w", encoding="utf-8") as f:
             json.dump(token_data, f, indent=4, sort_keys=True)
 
+    def _authenticate(self) -> str:
+        """
+        Handles first time authentication which involves the OAuth2 flow.
+        Returns:
+            access token obtained from the authentication.
+        """
+        authorization_code = start_local_server()
+        access_token = ""
+        if authorization_code:
+            scopes = ["https://ads.microsoft.com/msads.manage", "offline_access"]
+            token_url = f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}/oauth2/v2.0/token"
+            data = {
+                "client_id": os.getenv("CLIENT_ID"),
+                "client_secret": os.getenv("CLIENT_SECRET"),
+                "code": authorization_code,
+                "grant_type": "authorization_code",
+                "redirect_uri": os.getenv("REDIRECT_URI"),
+                "scope": ' '.join(scopes)
+            }
+
+            try:
+                response = requests.post(token_url, data=data)
+                response.raise_for_status()
+                token_data = response.json()
+                self.access_token = token_data["access_token"]
+                self.refresh_token = token_data["refresh_token"]
+                self.expires_at = time.time() + token_data["expires_in"]
+                access_token = self.access_token
+                self._save_tokens()
+            except requests.exceptions.RequestException as e:
+                print(f"Error getting tokens: {e}")
+            except KeyError as e:
+                print(f"Missing key in token response: {e}")
+
+        return access_token
+
     def _refresh_access_token(self) -> str:
         """
         Refreshes the access token using the refresh token, saves the new tokens and returns the access token
@@ -70,7 +107,7 @@ class BingAds:
             The access token as a string. An empty string means the operation to refresh the access token failed
         """
         if not self.refresh_token:
-            raise ValueError("Refresh token is missing. Obtain it first.")
+            return self._authenticate()
 
         token_url = f"https://login.microsoftonline.com/{os.getenv('TENANT_ID')}/oauth2/v2.0/token"
         data = {
@@ -110,7 +147,7 @@ class BingAds:
 
         return access_token
 
-    def get_access_token(self) -> str:
+    def _get_access_token(self) -> str:
         """Retrieves a valid access token, refreshing if necessary"""
         self._load_tokens()
         if self.access_token and self.expires_at > time.time() + 60:
@@ -118,13 +155,13 @@ class BingAds:
 
         return self._refresh_access_token()
 
-    def get_headers(self) -> None | dict[str, Any]:
+    def _get_headers(self) -> None | dict[str, Any]:
         """
         Build and return headers i.e Authorization, CustomerId, CustomerAccountId, Content-Type, DeveloperToken
         Returns:
             None if the access token is missing otherwise a dict of header information
         """
-        access_token = self.get_access_token()
+        access_token = self._get_access_token()
         if access_token == "":
             self.logger.error("[get_headers] Access token for Authorization header is missing")
             return None
@@ -662,7 +699,7 @@ class BingAds:
             return False
 
         self.logger.info("[download_and_load_report] Fetching performance report for %s", report_type)
-        headers = self.get_headers()
+        headers = self._get_headers()
         if not headers:
             self.logger.info("[download_and_load_report] Missing headers %s", report_type)
             return False
